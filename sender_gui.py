@@ -167,14 +167,9 @@ class SenderGUI:
 
     def on_close(self) -> None:
         if self.process is not None and self.process.poll() is None:
-            choice = messagebox.askyesnocancel(
-                "Sender Running",
-                "Sender is running.\n\nYes = keep running in background and close UI\nNo = stop sender and close UI\nCancel = keep UI open",
-            )
-            if choice is None:
-                return
-            if choice is False:
-                self.stop_sender()
+            # Keep app process alive and hide UI so sender keeps running.
+            self.root.withdraw()
+            return
         self.root.destroy()
 
 
