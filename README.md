@@ -42,7 +42,7 @@ Both scripts use `--control` with comma-separated values:
 Example:
 
 ```text
-screen,mouse,keyboard,mic
+screen,mouse,keyboard,mic,system_audio
 ```
 
 Important:
@@ -53,29 +53,29 @@ Important:
 Receiver (viewer/controller):
 
 ```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio
 ```
 
 Sender (shared PC):
 
 ```bash
-python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio --audio-rate 48000 --audio-channels 2
 ```
 
 `--token` must match on both sides.
 
 ## 5) Practical Mode Examples
 
-### A) Full remote desktop (video + mouse + keyboard + mic)
+### A) Full remote desktop (video + mouse + keyboard + mic + system audio)
 
 Receiver:
 ```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio
 ```
 
 Sender:
 ```bash
-python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio --audio-rate 48000 --audio-channels 2
 ```
 
 ### B) No audio (video + controls only)
@@ -126,7 +126,19 @@ Sender:
 python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,system_audio
 ```
 
-### F) Input only (mouse + keyboard, no screen/audio)
+### F) Screen + mixed audio (mic + system audio together)
+
+Receiver:
+```bash
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mic,system_audio
+```
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mic,system_audio --audio-rate 48000 --audio-channels 2
+```
+
+### G) Input only (mouse + keyboard, no screen/audio)
 
 Receiver:
 ```bash
@@ -184,6 +196,13 @@ Sender:
 python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,system_audio --audio-rate 48000 --audio-channels 2 --system-audio-device 5
 ```
 
+### List audio devices to find index
+
+Run on sender:
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
 ### 44.1 kHz audio
 
 Sender:
@@ -229,4 +248,5 @@ python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --cont
 - If connection fails over internet, use Tailscale or correct port forwarding.
 - If audio fails, try `--audio-rate 44100`.
 - For `system_audio`, use `--audio-channels 2` and optionally set `--system-audio-device`.
-- Do not enable both `mic` and `system_audio` at the same time on sender.
+- If you see `WasapiSettings...loopback` errors, update `sounddevice`; this code now also supports fallback loopback devices.
+- For mixed audio, enable `mic,system_audio` on both sides.

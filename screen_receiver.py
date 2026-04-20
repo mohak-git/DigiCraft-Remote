@@ -120,6 +120,7 @@ def main() -> None:
         and (
             (remote_audio_source == "mic" and wants_mic)
             or (remote_audio_source == "system_audio" and wants_system_audio)
+            or (remote_audio_source == "mixed" and wants_mic and wants_system_audio)
         )
     )
     control_enabled = bool(use_mouse or use_keyboard)

@@ -104,6 +104,29 @@ def parse_feature_flags(raw: str) -> set[str]:
     return selected
 
 
+def pick_system_loopback_input_device(explicit_device: int | None) -> int:
+    if explicit_device is not None:
+        return int(explicit_device)
+
+    devices = sd.query_devices()
+    default_output = sd.default.device[1]
+    if default_output is not None and int(default_output) >= 0:
+        output_name = str(devices[int(default_output)]["name"]).lower()
+        for idx, dev in enumerate(devices):
+            name = str(dev["name"]).lower()
+            if "loopback" in name and output_name in name:
+                return idx
+
+    for idx, dev in enumerate(devices):
+        if "loopback" in str(dev["name"]).lower():
+            return idx
+
+    raise RuntimeError(
+        "No WASAPI loopback input device found. "
+        "Try updating sounddevice, or pass --system-audio-device <index> for a valid loopback device."
+    )
+
+
 def send_packet(sock: socket.socket, packet_type: bytes, payload: bytes) -> None:
     sock.sendall(packet_type + struct.pack("!I", len(payload)))
     sock.sendall(payload)
@@ -232,52 +255,112 @@ def audio_streamer(
 ) -> None:
     blocksize = 1024
     max_queue_chunks = 60
-    audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=max_queue_chunks)
+    bytes_per_sample = 2
+    frame_bytes = blocksize * channels * bytes_per_sample
 
-    def on_audio(indata, frames, time_info, status) -> None:
-        if stop_event.is_set():
-            return
-        if status:
-            return
-        payload = bytes(indata)
+    def queue_push(q: queue.Queue[bytes], payload: bytes) -> None:
         try:
-            audio_queue.put_nowait(payload)
+            q.put_nowait(payload)
         except queue.Full:
-            # Drop oldest chunk to keep latency small.
             try:
-                audio_queue.get_nowait()
+                q.get_nowait()
             except queue.Empty:
                 pass
             try:
-                audio_queue.put_nowait(payload)
+                q.put_nowait(payload)
             except queue.Full:
                 pass
 
-    try:
-        stream_kwargs = {
+    def build_stream_kwargs(src: str, on_audio) -> dict:
+        kwargs = {
             "samplerate": sample_rate,
             "channels": channels,
             "dtype": "int16",
             "blocksize": blocksize,
             "callback": on_audio,
         }
-        if source == "system_audio":
-            # On Windows, capture speaker output via WASAPI loopback.
-            wasapi = sd.WasapiSettings(loopback=True)
-            if system_audio_device is not None:
-                stream_kwargs["device"] = system_audio_device
-            stream_kwargs["extra_settings"] = wasapi
+        if src == "system_audio":
+            kwargs["device"] = pick_system_loopback_input_device(system_audio_device)
+            try:
+                kwargs["extra_settings"] = sd.WasapiSettings(loopback=True)
+            except TypeError:
+                pass
+        return kwargs
 
-        with sd.RawInputStream(**stream_kwargs):
-            while not stop_event.is_set():
-                try:
-                    chunk = audio_queue.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                send_packet_locked(sock, send_lock, b"A", chunk)
-    except Exception as exc:
-        print(f"Audio stopped: {exc}")
-        stop_event.set()
+    if source in {"mic", "system_audio"}:
+        single_queue: queue.Queue[bytes] = queue.Queue(maxsize=max_queue_chunks)
+
+        def on_audio(indata, frames, time_info, status) -> None:
+            if stop_event.is_set() or status:
+                return
+            queue_push(single_queue, bytes(indata))
+
+        try:
+            with sd.RawInputStream(**build_stream_kwargs(source, on_audio)):
+                while not stop_event.is_set():
+                    try:
+                        chunk = single_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    send_packet_locked(sock, send_lock, b"A", chunk)
+            return
+        except Exception as exc:
+            print(f"Audio stopped: {exc}")
+            stop_event.set()
+            return
+
+    if source == "mixed":
+        mic_queue: queue.Queue[bytes] = queue.Queue(maxsize=max_queue_chunks)
+        sys_queue: queue.Queue[bytes] = queue.Queue(maxsize=max_queue_chunks)
+
+        def on_mic(indata, frames, time_info, status) -> None:
+            if stop_event.is_set() or status:
+                return
+            queue_push(mic_queue, bytes(indata))
+
+        def on_system(indata, frames, time_info, status) -> None:
+            if stop_event.is_set() or status:
+                return
+            queue_push(sys_queue, bytes(indata))
+
+        latest_mic = bytes(frame_bytes)
+        latest_sys = bytes(frame_bytes)
+        try:
+            with sd.RawInputStream(**build_stream_kwargs("mic", on_mic)), sd.RawInputStream(
+                **build_stream_kwargs("system_audio", on_system)
+            ):
+                while not stop_event.is_set():
+                    got = False
+                    try:
+                        latest_mic = mic_queue.get(timeout=0.03)
+                        got = True
+                    except queue.Empty:
+                        pass
+                    try:
+                        latest_sys = sys_queue.get_nowait()
+                        got = True
+                    except queue.Empty:
+                        pass
+                    if not got:
+                        continue
+
+                    mic_arr = np.frombuffer(latest_mic, dtype=np.int16).astype(np.int32)
+                    sys_arr = np.frombuffer(latest_sys, dtype=np.int16).astype(np.int32)
+                    length = min(len(mic_arr), len(sys_arr))
+                    if length == 0:
+                        continue
+                    mixed = np.clip(mic_arr[:length] + sys_arr[:length], -32768, 32767).astype(
+                        np.int16
+                    )
+                    send_packet_locked(sock, send_lock, b"A", mixed.tobytes())
+            return
+        except Exception as exc:
+            print(f"Audio stopped: {exc}")
+            stop_event.set()
+            return
+
+    print(f"Audio stopped: Unknown source mode '{source}'")
+    stop_event.set()
 
 
 def main() -> None:
@@ -288,8 +371,6 @@ def main() -> None:
     share_system_audio = "system_audio" in features
     allow_mouse_control = "mouse" in features
     allow_keyboard_control = "keyboard" in features
-    if share_mic and share_system_audio:
-        raise ValueError("Select only one audio source: mic OR system_audio.")
     jpeg_quality = max(1, min(100, args.quality))
     frame_interval = 1.0 / max(1.0, args.fps)
     pyautogui.FAILSAFE = True
@@ -317,7 +398,11 @@ def main() -> None:
             "enabled_features": sorted(features),
             "token": args.token,
             "audio_enabled": bool(share_mic or share_system_audio),
-            "audio_source": "system_audio" if share_system_audio else ("mic" if share_mic else "none"),
+            "audio_source": (
+                "mixed"
+                if (share_mic and share_system_audio)
+                else ("system_audio" if share_system_audio else ("mic" if share_mic else "none"))
+            ),
             "audio_rate": int(args.audio_rate),
             "audio_channels": int(args.audio_channels),
         }
@@ -352,14 +437,19 @@ def main() -> None:
                     stop_event,
                     int(args.audio_rate),
                     int(args.audio_channels),
-                    "system_audio" if share_system_audio else "mic",
+                    (
+                        "mixed"
+                        if (share_mic and share_system_audio)
+                        else ("system_audio" if share_system_audio else "mic")
+                    ),
                     args.system_audio_device,
                 ),
                 daemon=True,
             )
             audio_thread.start()
             print(
-                f"Audio streaming enabled ({'system' if share_system_audio else 'mic'}): "
+                f"Audio streaming enabled "
+                f"({'mixed' if (share_mic and share_system_audio) else ('system' if share_system_audio else 'mic')}): "
                 f"{int(args.audio_rate)} Hz, {int(args.audio_channels)} channel(s)."
             )
 

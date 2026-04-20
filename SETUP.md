@@ -71,7 +71,7 @@ To connect from different places (different routers), use one of:
 Both scripts use:
 
 ```text
---control screen,mouse,keyboard,mic
+--control screen,mouse,keyboard,mic,system_audio
 ```
 
 Available feature names:
@@ -95,13 +95,13 @@ Use a token (password-style string), example: `mysecret`.
 ### Step 1: Start receiver PC first
 
 ```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio
 ```
 
 ### Step 2: Start sender PC
 
 ```bash
-python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio --audio-rate 48000 --audio-channels 2
 ```
 
 Replace `<receiver_ip>` with:
@@ -116,7 +116,7 @@ Replace `<receiver_ip>` with:
 ### Full remote desktop
 
 ```text
-screen,mouse,keyboard,mic
+screen,mouse,keyboard,mic,system_audio
 ```
 
 ### No audio
@@ -141,6 +141,12 @@ screen,mic
 
 ```text
 screen,system_audio
+```
+
+### Screen + mixed audio (mic + system audio)
+
+```text
+screen,mic,system_audio
 ```
 
 ### Input only
@@ -207,6 +213,16 @@ python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --cont
 python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,system_audio --audio-rate 48000 --audio-channels 2 --system-audio-device 5
 ```
 
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mic,system_audio --audio-rate 48000 --audio-channels 2
+```
+
+List available audio devices:
+
+```bash
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
 ---
 
 ## 9) Verify It Works
@@ -218,6 +234,7 @@ After both scripts are running:
 - Typing in receiver window should type on sender (if `keyboard` enabled).
 - Receiver should hear sender mic input (if `mic` enabled).
 - Receiver should hear sender system sound (if `system_audio` enabled).
+- Receiver should hear mixed mic + system sound (if both are enabled).
 
 ---
 
@@ -252,7 +269,8 @@ After both scripts are running:
 - Check microphone permission and device availability.
 - For system audio, prefer `--audio-channels 2`.
 - If needed, set `--system-audio-device` to the speaker/output device index.
-- Do not enable both `mic` and `system_audio` together on sender.
+- If you get a `WasapiSettings...loopback` error, update `sounddevice`; fallback loopback capture is now supported.
+- For mixed audio, set `--control screen,mic,system_audio` on both sides.
 
 ---
 
@@ -261,11 +279,11 @@ After both scripts are running:
 Receiver:
 
 ```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio
 ```
 
 Sender:
 
 ```bash
-python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic,system_audio --audio-rate 48000 --audio-channels 2
 ```
