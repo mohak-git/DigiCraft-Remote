@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import json
+import queue
 import socket
 import struct
 import threading
@@ -10,6 +11,7 @@ import cv2
 import mss
 import numpy as np
 import pyautogui
+import sounddevice as sd
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -60,16 +62,40 @@ def parse_args() -> argparse.Namespace:
         help="Resize factor before sending, e.g. 0.75 (default: 1.0)",
     )
     parser.add_argument(
-        "--allow-control",
-        action="store_true",
-        help="Allow receiver to control mouse/keyboard on this PC",
+        "--control",
+        default="screen,mouse,keyboard",
+        help="Comma-separated features to share: screen,mouse,keyboard,mic",
     )
     parser.add_argument(
         "--token",
         default="",
         help="Optional shared token for basic access control",
     )
+    parser.add_argument(
+        "--audio-rate",
+        type=int,
+        default=48000,
+        help="Audio sample rate (default: 48000)",
+    )
+    parser.add_argument(
+        "--audio-channels",
+        type=int,
+        default=1,
+        help="Audio channels (default: 1)",
+    )
     return parser.parse_args()
+
+
+def parse_feature_flags(raw: str) -> set[str]:
+    allowed = {"screen", "mouse", "keyboard", "mic"}
+    selected = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    unknown = selected - allowed
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown control feature(s): {bad}")
+    if not selected:
+        raise ValueError("At least one control feature must be selected.")
+    return selected
 
 
 def send_packet(sock: socket.socket, packet_type: bytes, payload: bytes) -> None:
@@ -93,6 +119,13 @@ def recv_packet(sock: socket.socket) -> tuple[bytes, bytes]:
     (size,) = struct.unpack("!I", header[1:])
     payload = recv_exact(sock, size)
     return packet_type, payload
+
+
+def send_packet_locked(
+    sock: socket.socket, lock: threading.Lock, packet_type: bytes, payload: bytes
+) -> None:
+    with lock:
+        send_packet(sock, packet_type, payload)
 
 
 def clamp_to_monitor(monitor: dict, x: int, y: int) -> tuple[int, int]:
@@ -156,7 +189,7 @@ def apply_control_event(event: dict, monitor: dict) -> None:
 def control_listener(
     sock: socket.socket,
     monitor: dict,
-    allow_control: bool,
+    allowed_input_features: set[str],
     stop_event: threading.Event,
 ) -> None:
     while not stop_event.is_set():
@@ -168,19 +201,76 @@ def control_listener(
 
         if packet_type != b"C":
             continue
-        if not allow_control:
-            continue
 
         try:
             event = json.loads(payload.decode("utf-8"))
+            etype = str(event.get("type", ""))
+            if etype.startswith("mouse_") and "mouse" not in allowed_input_features:
+                continue
+            if (etype == "key" or etype == "type_text") and "keyboard" not in allowed_input_features:
+                continue
             apply_control_event(event, monitor)
         except Exception:
             # Ignore malformed/unhandled control packets to keep streaming stable.
             continue
 
 
+def audio_streamer(
+    sock: socket.socket,
+    send_lock: threading.Lock,
+    stop_event: threading.Event,
+    sample_rate: int,
+    channels: int,
+) -> None:
+    blocksize = 1024
+    max_queue_chunks = 60
+    audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=max_queue_chunks)
+
+    def on_audio(indata, frames, time_info, status) -> None:
+        if stop_event.is_set():
+            return
+        if status:
+            return
+        payload = bytes(indata)
+        try:
+            audio_queue.put_nowait(payload)
+        except queue.Full:
+            # Drop oldest chunk to keep latency small.
+            try:
+                audio_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                audio_queue.put_nowait(payload)
+            except queue.Full:
+                pass
+
+    try:
+        with sd.RawInputStream(
+            samplerate=sample_rate,
+            channels=channels,
+            dtype="int16",
+            blocksize=blocksize,
+            callback=on_audio,
+        ):
+            while not stop_event.is_set():
+                try:
+                    chunk = audio_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                send_packet_locked(sock, send_lock, b"A", chunk)
+    except Exception as exc:
+        print(f"Audio stopped: {exc}")
+        stop_event.set()
+
+
 def main() -> None:
     args = parse_args()
+    features = parse_feature_flags(args.control)
+    share_screen = "screen" in features
+    share_mic = "mic" in features
+    allow_mouse_control = "mouse" in features
+    allow_keyboard_control = "keyboard" in features
     jpeg_quality = max(1, min(100, args.quality))
     frame_interval = 1.0 / max(1.0, args.fps)
     pyautogui.FAILSAFE = True
@@ -190,7 +280,7 @@ def main() -> None:
     print(f"Connecting to receiver {args.host}:{args.port} ...")
     sock = socket.create_connection((args.host, args.port), timeout=10)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    print("Connected. Streaming started. Press Ctrl+C to stop.")
+    print("Connected. Sharing started. Press Ctrl+C to stop.")
 
     with mss.mss() as sct:
         if args.monitor < 1 or args.monitor >= len(sct.monitors):
@@ -200,25 +290,62 @@ def main() -> None:
         monitor = sct.monitors[args.monitor]
         encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
         stop_event = threading.Event()
+        send_lock = threading.Lock()
 
         hello = {
             "monitor_width": int(monitor["width"]),
             "monitor_height": int(monitor["height"]),
-            "allow_control": bool(args.allow_control),
+            "enabled_features": sorted(features),
             "token": args.token,
+            "audio_enabled": bool(share_mic),
+            "audio_rate": int(args.audio_rate),
+            "audio_channels": int(args.audio_channels),
         }
-        send_packet(sock, b"I", json.dumps(hello).encode("utf-8"))
+        send_packet_locked(sock, send_lock, b"I", json.dumps(hello).encode("utf-8"))
 
         listener_thread = threading.Thread(
             target=control_listener,
-            args=(sock, monitor, args.allow_control, stop_event),
+            args=(
+                sock,
+                monitor,
+                {
+                    name
+                    for name, enabled in (
+                        ("mouse", allow_mouse_control),
+                        ("keyboard", allow_keyboard_control),
+                    )
+                    if enabled
+                },
+                stop_event,
+            ),
             daemon=True,
         )
         listener_thread.start()
 
+        audio_thread = None
+        if share_mic:
+            audio_thread = threading.Thread(
+                target=audio_streamer,
+                args=(
+                    sock,
+                    send_lock,
+                    stop_event,
+                    int(args.audio_rate),
+                    int(args.audio_channels),
+                ),
+                daemon=True,
+            )
+            audio_thread.start()
+            print(
+                f"Audio streaming enabled: {int(args.audio_rate)} Hz, {int(args.audio_channels)} channel(s)."
+            )
+
         try:
             while not stop_event.is_set():
                 start = time.perf_counter()
+                if not share_screen:
+                    time.sleep(0.05)
+                    continue
 
                 raw = sct.grab(monitor)
                 frame = np.array(raw)[:, :, :3]  # BGRA -> BGR
@@ -236,7 +363,7 @@ def main() -> None:
                 if not ok:
                     continue
 
-                send_packet(sock, b"F", encoded.tobytes())
+                send_packet_locked(sock, send_lock, b"F", encoded.tobytes())
 
                 elapsed = time.perf_counter() - start
                 sleep_for = frame_interval - elapsed

@@ -1,10 +1,13 @@
 import argparse
 import json
+import queue
 import socket
 import struct
+import threading
 
 import cv2
 import numpy as np
+import sounddevice as sd
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,10 +32,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--control",
-        action="store_true",
-        help="Send mouse/keyboard events to sender (requires sender --allow-control)",
+        default="screen,mouse,keyboard,mic",
+        help="Comma-separated features to use: screen,mouse,keyboard,mic",
     )
     return parser.parse_args()
+
+
+def parse_feature_flags(raw: str) -> set[str]:
+    allowed = {"screen", "mouse", "keyboard", "mic"}
+    selected = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    unknown = selected - allowed
+    if unknown:
+        bad = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown control feature(s): {bad}")
+    if not selected:
+        raise ValueError("At least one control feature must be selected.")
+    return selected
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -60,6 +75,7 @@ def recv_packet(sock: socket.socket) -> tuple[bytes, bytes]:
 
 def main() -> None:
     args = parse_args()
+    local_features = parse_feature_flags(args.control)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,19 +96,27 @@ def main() -> None:
     hello = json.loads(payload.decode("utf-8"))
     remote_width = int(hello.get("monitor_width", 1920))
     remote_height = int(hello.get("monitor_height", 1080))
-    remote_allows_control = bool(hello.get("allow_control", False))
+    remote_features = set(hello.get("enabled_features", []))
     remote_token = str(hello.get("token", ""))
+    remote_audio_enabled = bool(hello.get("audio_enabled", False))
+    remote_audio_rate = int(hello.get("audio_rate", 48000))
+    remote_audio_channels = int(hello.get("audio_channels", 1))
 
     if args.token != remote_token:
         conn.close()
         server.close()
         raise RuntimeError("Token mismatch. Set same --token on sender and receiver.")
 
-    control_enabled = bool(args.control and remote_allows_control)
+    use_mouse = "mouse" in local_features and "mouse" in remote_features
+    use_keyboard = "keyboard" in local_features and "keyboard" in remote_features
+    use_screen = "screen" in local_features and "screen" in remote_features
+    use_mic = "mic" in local_features and "mic" in remote_features and remote_audio_enabled
+    control_enabled = bool(use_mouse or use_keyboard)
     print(f"Remote monitor: {remote_width}x{remote_height}")
-    if args.control and not remote_allows_control:
-        print("Receiver requested control but sender did not enable --allow-control.")
+    print(f"Sender features: {', '.join(sorted(remote_features))}")
     print(f"Control active: {'yes' if control_enabled else 'no'}")
+    audio_play_enabled = bool(use_mic)
+    print(f"Audio active: {'yes' if audio_play_enabled else 'no'}")
     print("Focus video window for keyboard control.")
 
     window_name = "Remote Screen"
@@ -110,6 +134,11 @@ def main() -> None:
 
     def send_control(event: dict) -> None:
         if not control_enabled:
+            return
+        etype = str(event.get("type", ""))
+        if etype.startswith("mouse_") and not use_mouse:
+            return
+        if (etype == "key" or etype == "type_text") and not use_keyboard:
             return
         send_packet(conn, b"C", json.dumps(event).encode("utf-8"))
 
@@ -177,10 +206,56 @@ def main() -> None:
         32: "space",
     }
 
+    stop_audio = threading.Event()
+    audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=120)
+
+    def audio_player() -> None:
+        try:
+            with sd.RawOutputStream(
+                samplerate=remote_audio_rate,
+                channels=remote_audio_channels,
+                dtype="int16",
+                blocksize=1024,
+            ) as stream:
+                while not stop_audio.is_set():
+                    try:
+                        chunk = audio_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    stream.write(chunk)
+        except Exception as exc:
+            print(f"Audio playback stopped: {exc}")
+            stop_audio.set()
+
+    audio_thread = None
+    if audio_play_enabled:
+        audio_thread = threading.Thread(target=audio_player, daemon=True)
+        audio_thread.start()
+        print(
+            f"Audio playback started: {remote_audio_rate} Hz, {remote_audio_channels} channel(s)."
+        )
+
     try:
         while True:
             packet_type, payload = recv_packet(conn)
+            if packet_type == b"A":
+                if audio_play_enabled and not stop_audio.is_set():
+                    try:
+                        audio_queue.put_nowait(payload)
+                    except queue.Full:
+                        # Drop oldest chunk to keep latency low.
+                        try:
+                            audio_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            audio_queue.put_nowait(payload)
+                        except queue.Full:
+                            pass
+                continue
             if packet_type != b"F":
+                continue
+            if not use_screen:
                 continue
 
             img_array = np.frombuffer(payload, dtype=np.uint8)
@@ -194,7 +269,7 @@ def main() -> None:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            if control_enabled and key != 255:
+            if use_keyboard and key != 255:
                 if key in key_map:
                     send_control({"type": "key", "action": "press", "key": key_map[key]})
                 elif 32 <= key <= 126:
@@ -203,6 +278,7 @@ def main() -> None:
     except (ConnectionError, OSError) as exc:
         print(f"Connection ended: {exc}")
     finally:
+        stop_audio.set()
         try:
             conn.close()
         except Exception:

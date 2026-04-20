@@ -1,183 +1,200 @@
-# Python Screen Share (Sender + Receiver)
+# Windows Remote Share + Control
 
-This project has 2 scripts:
+Simple Python remote share for Windows with:
+- Screen streaming
+- Mouse + keyboard remote control
+- Microphone audio streaming
+- Feature toggle system via `--control`
 
-- `screen_sender.py` -> captures your screen and sends video frames (+ optionally accepts remote control)
-- `screen_receiver.py` -> receives frames, shows live screen, and can send mouse/keyboard control events
+This project has:
+- `screen_sender.py` -> run on the PC being shared
+- `screen_receiver.py` -> run on the PC that watches/controls
 
-Works on Windows.  
-Can run on same Wi-Fi/LAN or over global internet.
+## 1) Install
 
----
-
-## 1) Requirements
-
-- Windows PC on both sides
-- Python 3.9+ installed
-- Internet connection
-
-Install packages on both PCs:
+Run on both PCs:
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+## 2) Features
 
-## 2) Files
+- **Screen**: live video stream from sender monitor
+- **Mouse**: move/click/scroll remote pointer
+- **Keyboard**: send key presses to sender PC
+- **Mic**: stream sender microphone audio to receiver
+- **Token**: basic shared access token check
+- **Precision pointer mapping**: DPI-aware sender cursor placement
 
-- `screen_sender.py` - run on the PC that shares screen
-- `screen_receiver.py` - run on the PC that watches screen
-- `requirements.txt` - dependencies (`opencv-python`, `mss`, `numpy`, `pyautogui`)
+## 3) `--control` Feature Selector
 
----
+Both scripts use `--control` with comma-separated values:
 
-## 3) Quick Test on Same Network (LAN)
+- `screen`
+- `mouse`
+- `keyboard`
+- `mic`
 
-### On receiver PC
+Example:
 
-```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999
-```
-
-### On sender PC
-
-Use receiver local IP (example `192.168.1.50`):
-
-```bash
-python screen_sender.py --host 192.168.1.50 --port 9999
-```
-
----
-
-## 4) Run Over Global Internet (Different Routers)
-
-If both PCs are on different networks, direct local IP will NOT work.
-
-Use one of these methods:
-
-1. Tailscale (recommended, easiest)
-2. Port forwarding + public IP
-
-### Method A: Tailscale (Recommended)
-
-No code change needed.
-
-1. Install Tailscale on both PCs.
-2. Login with the same Tailscale account.
-3. Get receiver Tailscale IP (looks like `100.x.x.x`).
-4. Start receiver:
-
-```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999
-```
-
-5. Start sender using receiver Tailscale IP:
-
-```bash
-python screen_sender.py --host 100.x.x.x --port 9999
-```
-
-### Method B: Port Forwarding
-
-1. On receiver router, forward TCP port `9999` to receiver PC local IP.
-2. Find receiver public IP.
-3. Start receiver:
-
-```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999
-```
-
-4. Start sender with receiver public IP:
-
-```bash
-python screen_sender.py --host <receiver_public_ip> --port 9999
-```
-
-Note: If receiver uses CGNAT/double NAT, port forwarding may fail. In that case use Tailscale.
-
----
-
-## 5) Full Remote Control Mode (Mouse + Keyboard)
-
-For "real remote desktop style" control, run with control flags on both sides.
-
-### Sender (the PC being controlled)
-
-```bash
-python screen_sender.py --host <receiver_ip> --port 9999 --allow-control --token mysecret
-```
-
-### Receiver (the PC controlling remotely)
-
-```bash
-python screen_receiver.py --host 0.0.0.0 --port 9999 --control --token mysecret
+```text
+screen,mouse,keyboard,mic
 ```
 
 Important:
+- A feature becomes active only if **both sender and receiver** include it in `--control`.
 
-- `--token` must match on both sides
-- Keyboard works when receiver video window is focused
-- Press `q` in receiver window to quit
-- Move mouse to top-left corner on sender PC to trigger PyAutoGUI fail-safe
+## 4) Full Example (All Features)
 
----
-
-## 6) Sender Options
+Receiver (viewer/controller):
 
 ```bash
-python screen_sender.py --host <ip> --port 9999 --fps 12 --quality 65 --scale 1.0 --monitor 1
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic
 ```
 
-- `--host` (required): receiver IP
-- `--port`: receiver port (default `9999`)
-- `--fps`: target frame rate (default `12`)
-- `--quality`: JPEG quality 1-100 (default `65`)
-- `--scale`: frame resize factor (default `1.0`)
-- `--monitor`: monitor index (default `1`)
-
-### Example (better for slow internet)
+Sender (shared PC):
 
 ```bash
-python screen_sender.py --host 100.64.20.5 --port 9999 --fps 10 --quality 55 --scale 0.7
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic
 ```
 
----
+`--token` must match on both sides.
 
-## 7) Stop Streaming
+## 5) Practical Mode Examples
 
-- Receiver: focus video window and press `q`
-- Sender: press `Ctrl + C`
+### A) Full remote desktop (video + mouse + keyboard + mic)
 
----
-
-## 8) Troubleshooting
-
-### Connection refused / timeout
-
-- Check receiver script is running first
-- Check IP and port are correct
-- Allow Python in Windows Defender Firewall
-- Try changing port to `10000` on both sides
-
-### Black screen / no window update
-
-- Keep sender screen unlocked and active
-- Lower fps and quality:
-
+Receiver:
 ```bash
-python screen_sender.py --host <ip> --fps 8 --quality 45 --scale 0.6
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard,mic
 ```
 
-### Over internet not connecting
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard,mic
+```
 
-- Prefer Tailscale
-- If using port forwarding, verify router rule and public IP
-- ISP CGNAT can block inbound connection
+### B) No audio (video + controls only)
 
----
+Receiver:
+```bash
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mouse,keyboard
+```
 
-## 9) Security Note
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard
+```
 
-Current version supports basic token check (`--token`) but does not use transport encryption.
-For sensitive use, run through Tailscale or VPN and use a strong token.
+### C) View only
+
+Receiver:
+```bash
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen
+```
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen
+```
+
+### D) Screen + mic only (no remote input)
+
+Receiver:
+```bash
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control screen,mic
+```
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mic
+```
+
+### E) Input only (mouse + keyboard, no screen/mic)
+
+Receiver:
+```bash
+python screen_receiver.py --host 0.0.0.0 --port 9999 --token mysecret --control mouse,keyboard
+```
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control mouse,keyboard
+```
+
+## 6) Video Quality / Performance Examples
+
+### Low bandwidth internet
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard --fps 8 --quality 45 --scale 0.6
+```
+
+### Balanced default
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard --fps 12 --quality 65 --scale 1.0
+```
+
+### Better LAN quality
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mouse,keyboard --fps 20 --quality 80 --scale 1.0
+```
+
+## 7) Audio Settings Examples
+
+### Default audio
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mic --audio-rate 48000 --audio-channels 1
+```
+
+### 44.1 kHz audio
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mic --audio-rate 44100 --audio-channels 1
+```
+
+### Stereo audio
+
+Sender:
+```bash
+python screen_sender.py --host <receiver_ip> --port 9999 --token mysecret --control screen,mic --audio-rate 48000 --audio-channels 2
+```
+
+## 8) All CLI Flags
+
+### `screen_sender.py`
+
+- `--host` (required): receiver IP/hostname
+- `--port` (default `9999`): receiver port
+- `--control` (default `screen,mouse,keyboard`): features to share
+- `--token` (default empty): shared auth token
+- `--fps` (default `12.0`): target video FPS
+- `--quality` (default `65`): JPEG quality (1-100)
+- `--monitor` (default `1`): monitor index from `mss.monitors`
+- `--scale` (default `1.0`): resize factor before sending
+- `--audio-rate` (default `48000`): mic sample rate
+- `--audio-channels` (default `1`): mic channels
+
+### `screen_receiver.py`
+
+- `--host` (default `0.0.0.0`): bind address
+- `--port` (default `9999`): listening port
+- `--control` (default `screen,mouse,keyboard,mic`): features to use
+- `--token` (default empty): shared auth token
+
+## 9) Stop / Notes / Troubleshooting
+
+- Press `q` in receiver window to stop.
+- Keyboard control works only when receiver video window is focused.
+- For best pointer precision, keep sender display scaling stable during session.
+- If connection fails over internet, use Tailscale or correct port forwarding.
+- If audio fails, try `--audio-rate 44100`.
