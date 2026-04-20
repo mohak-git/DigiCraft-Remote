@@ -127,6 +127,8 @@ class SenderGUI:
         self._append_log(" ".join(cmd))
 
         creationflags = 0
+        if hasattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB"):
+            creationflags |= subprocess.CREATE_BREAKAWAY_FROM_JOB
         if hasattr(subprocess, "DETACHED_PROCESS"):
             creationflags |= subprocess.DETACHED_PROCESS
         if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
