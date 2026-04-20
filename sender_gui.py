@@ -1,6 +1,5 @@
 import subprocess
 import sys
-import threading
 import tkinter as tk
 from tkinter import messagebox
 
@@ -13,8 +12,6 @@ class SenderGUI:
         self.root.title("Screen Sender UI")
         self.root.geometry("540x500")
         self.process: subprocess.Popen | None = None
-        self.reader_thread: threading.Thread | None = None
-        self.output_lines = 0
 
         self.host_var = tk.StringVar()
         self.port_var = tk.StringVar(value="9999")
@@ -115,24 +112,6 @@ class SenderGUI:
         # In script mode, launch this script with --run-sender using python.
         return [sys.executable, __file__, "--run-sender", *sender_args]
 
-    def _read_process_output(self) -> None:
-        assert self.process is not None
-        while True:
-            line = self.process.stdout.readline()
-            if not line:
-                break
-            self.root.after(0, self._append_log, line.rstrip("\n"))
-
-        return_code = self.process.wait()
-        self.root.after(0, self._on_process_exit, return_code)
-
-    def _on_process_exit(self, return_code: int) -> None:
-        self.status_var.set(f"Stopped (exit code {return_code})")
-        self.start_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-        self.process = None
-        self.reader_thread = None
-
     def start_sender(self) -> None:
         if self.process is not None and self.process.poll() is None:
             messagebox.showinfo("Already Running", "Sender is already running.")
@@ -148,28 +127,30 @@ class SenderGUI:
         self._append_log(" ".join(cmd))
 
         creationflags = 0
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            creationflags |= subprocess.DETACHED_PROCESS
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
         if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            creationflags = subprocess.CREATE_NO_WINDOW
+            creationflags |= subprocess.CREATE_NO_WINDOW
 
         try:
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
+                close_fds=True,
             )
         except Exception as exc:
             messagebox.showerror("Start Failed", str(exc))
             self.process = None
             return
 
-        self.status_var.set("Running")
+        self.status_var.set(f"Running in background (PID {self.process.pid})")
+        self._append_log(f"Sender started in background. PID: {self.process.pid}")
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
-
-        self.reader_thread = threading.Thread(target=self._read_process_output, daemon=True)
-        self.reader_thread.start()
 
     def stop_sender(self) -> None:
         if self.process is None or self.process.poll() is not None:
@@ -180,15 +161,20 @@ class SenderGUI:
 
         self._append_log("Stopping sender...")
         self.process.terminate()
+        self.status_var.set("Stopped")
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
 
     def on_close(self) -> None:
         if self.process is not None and self.process.poll() is None:
-            if not messagebox.askyesno(
+            choice = messagebox.askyesnocancel(
                 "Sender Running",
-                "Sender is running in background.\nStop it and close the UI?",
-            ):
+                "Sender is running.\n\nYes = keep running in background and close UI\nNo = stop sender and close UI\nCancel = keep UI open",
+            )
+            if choice is None:
                 return
-            self.stop_sender()
+            if choice is False:
+                self.stop_sender()
         self.root.destroy()
 
 
