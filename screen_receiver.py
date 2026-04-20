@@ -96,34 +96,16 @@ def main() -> None:
     print("Focus video window for keyboard control.")
 
     window_name = "Remote Screen"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
     last_frame_size = [remote_width, remote_height]
 
     def to_remote_coords(x: int, y: int) -> tuple[int, int] | None:
         frame_w = max(1, int(last_frame_size[0]))
         frame_h = max(1, int(last_frame_size[1]))
-        try:
-            _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
-        except cv2.error:
-            win_w, win_h = frame_w, frame_h
-        if win_w <= 0 or win_h <= 0:
-            win_w, win_h = frame_w, frame_h
-
-        # OpenCV keeps aspect ratio in many window states; account for padding
-        # (letterbox/pillarbox) so pointer mapping stays accurate.
-        scale = min(win_w / frame_w, win_h / frame_h)
-        draw_w = max(1.0, frame_w * scale)
-        draw_h = max(1.0, frame_h * scale)
-        offset_x = (win_w - draw_w) / 2.0
-        offset_y = (win_h - draw_h) / 2.0
-
-        if x < offset_x or y < offset_y or x > (offset_x + draw_w) or y > (offset_y + draw_h):
+        if x < 0 or y < 0 or x >= frame_w or y >= frame_h:
             return None
-
-        frame_x = (x - offset_x) / scale
-        frame_y = (y - offset_y) / scale
-        rx = int(max(0, min(remote_width - 1, (frame_x / frame_w) * remote_width)))
-        ry = int(max(0, min(remote_height - 1, (frame_y / frame_h) * remote_height)))
+        rx = int(max(0, min(remote_width - 1, (x / frame_w) * remote_width)))
+        ry = int(max(0, min(remote_height - 1, (y / frame_h) * remote_height)))
         return rx, ry
 
     def send_control(event: dict) -> None:

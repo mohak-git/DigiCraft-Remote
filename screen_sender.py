@@ -1,4 +1,5 @@
 import argparse
+import ctypes
 import json
 import socket
 import struct
@@ -9,6 +10,14 @@ import cv2
 import mss
 import numpy as np
 import pyautogui
+
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_WHEEL = 0x0800
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,25 +95,48 @@ def recv_packet(sock: socket.socket) -> tuple[bytes, bytes]:
     return packet_type, payload
 
 
+def clamp_to_monitor(monitor: dict, x: int, y: int) -> tuple[int, int]:
+    cx = max(0, min(int(monitor["width"]) - 1, int(x)))
+    cy = max(0, min(int(monitor["height"]) - 1, int(y)))
+    return cx, cy
+
+
+def set_cursor_position(user32: ctypes.WinDLL, monitor: dict, x: int, y: int) -> None:
+    cx, cy = clamp_to_monitor(monitor, x, y)
+    user32.SetCursorPos(int(monitor["left"]) + cx, int(monitor["top"]) + cy)
+
+
+def mouse_button_flag(button: str, action: str) -> int | None:
+    button = button.lower().strip()
+    action = action.lower().strip()
+    if button == "left":
+        return MOUSEEVENTF_LEFTDOWN if action == "down" else MOUSEEVENTF_LEFTUP
+    if button == "right":
+        return MOUSEEVENTF_RIGHTDOWN if action == "down" else MOUSEEVENTF_RIGHTUP
+    if button == "middle":
+        return MOUSEEVENTF_MIDDLEDOWN if action == "down" else MOUSEEVENTF_MIDDLEUP
+    return None
+
+
 def apply_control_event(event: dict, monitor: dict) -> None:
     etype = event.get("type")
+    user32 = ctypes.windll.user32
     if etype == "mouse_move":
         x = int(event.get("x", 0))
         y = int(event.get("y", 0))
-        pyautogui.moveTo(monitor["left"] + x, monitor["top"] + y)
+        set_cursor_position(user32, monitor, x, y)
     elif etype == "mouse_click":
         x = int(event.get("x", 0))
         y = int(event.get("y", 0))
         button = event.get("button", "left")
         action = event.get("action", "down")
-        pyautogui.moveTo(monitor["left"] + x, monitor["top"] + y)
-        if action == "down":
-            pyautogui.mouseDown(button=button)
-        elif action == "up":
-            pyautogui.mouseUp(button=button)
+        set_cursor_position(user32, monitor, x, y)
+        flag = mouse_button_flag(button, action)
+        if flag is not None:
+            user32.mouse_event(flag, 0, 0, 0, 0)
     elif etype == "mouse_scroll":
         amount = int(event.get("amount", 0))
-        pyautogui.scroll(amount)
+        user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, amount, 0)
     elif etype == "key":
         key = str(event.get("key", "")).lower().strip()
         action = event.get("action", "press")
@@ -152,6 +184,8 @@ def main() -> None:
     jpeg_quality = max(1, min(100, args.quality))
     frame_interval = 1.0 / max(1.0, args.fps)
     pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0
+    ctypes.windll.user32.SetProcessDPIAware()
 
     print(f"Connecting to receiver {args.host}:{args.port} ...")
     sock = socket.create_connection((args.host, args.port), timeout=10)
