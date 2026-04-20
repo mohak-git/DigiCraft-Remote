@@ -355,8 +355,18 @@ def audio_streamer(
                     send_packet_locked(sock, send_lock, b"A", mixed.tobytes())
             return
         except Exception as exc:
-            print(f"Audio stopped: {exc}")
-            stop_event.set()
+            # Keep session alive even when system loopback is unavailable.
+            print(f"Mixed audio warning: {exc}")
+            print("Falling back to mic-only audio stream.")
+            audio_streamer(
+                sock=sock,
+                send_lock=send_lock,
+                stop_event=stop_event,
+                sample_rate=sample_rate,
+                channels=channels,
+                source="mic",
+                system_audio_device=system_audio_device,
+            )
             return
 
     print(f"Audio stopped: Unknown source mode '{source}'")
