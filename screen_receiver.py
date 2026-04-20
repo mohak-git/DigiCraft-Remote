@@ -97,17 +97,33 @@ def main() -> None:
 
     window_name = "Remote Screen"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    last_mouse_pos = [0, 0]
+    last_frame_size = [remote_width, remote_height]
 
-    def to_remote_coords(x: int, y: int) -> tuple[int, int]:
+    def to_remote_coords(x: int, y: int) -> tuple[int, int] | None:
+        frame_w = max(1, int(last_frame_size[0]))
+        frame_h = max(1, int(last_frame_size[1]))
         try:
-            _, _, w, h = cv2.getWindowImageRect(window_name)
+            _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
         except cv2.error:
-            w, h = remote_width, remote_height
-        if w <= 0 or h <= 0:
-            w, h = remote_width, remote_height
-        rx = int(max(0, min(remote_width - 1, (x / w) * remote_width)))
-        ry = int(max(0, min(remote_height - 1, (y / h) * remote_height)))
+            win_w, win_h = frame_w, frame_h
+        if win_w <= 0 or win_h <= 0:
+            win_w, win_h = frame_w, frame_h
+
+        # OpenCV keeps aspect ratio in many window states; account for padding
+        # (letterbox/pillarbox) so pointer mapping stays accurate.
+        scale = min(win_w / frame_w, win_h / frame_h)
+        draw_w = max(1.0, frame_w * scale)
+        draw_h = max(1.0, frame_h * scale)
+        offset_x = (win_w - draw_w) / 2.0
+        offset_y = (win_h - draw_h) / 2.0
+
+        if x < offset_x or y < offset_y or x > (offset_x + draw_w) or y > (offset_y + draw_h):
+            return None
+
+        frame_x = (x - offset_x) / scale
+        frame_y = (y - offset_y) / scale
+        rx = int(max(0, min(remote_width - 1, (frame_x / frame_w) * remote_width)))
+        ry = int(max(0, min(remote_height - 1, (frame_y / frame_h) * remote_height)))
         return rx, ry
 
     def send_control(event: dict) -> None:
@@ -116,9 +132,10 @@ def main() -> None:
         send_packet(conn, b"C", json.dumps(event).encode("utf-8"))
 
     def on_mouse(event: int, x: int, y: int, flags: int, param: object) -> None:
-        rx, ry = to_remote_coords(x, y)
-        last_mouse_pos[0] = rx
-        last_mouse_pos[1] = ry
+        coords = to_remote_coords(x, y)
+        if coords is None:
+            return
+        rx, ry = coords
 
         if event == cv2.EVENT_MOUSEMOVE:
             send_control({"type": "mouse_move", "x": rx, "y": ry})
@@ -188,6 +205,8 @@ def main() -> None:
             frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             if frame is None:
                 continue
+            last_frame_size[0] = int(frame.shape[1])
+            last_frame_size[1] = int(frame.shape[0])
 
             cv2.imshow(window_name, frame)
             key = cv2.waitKey(1) & 0xFF
